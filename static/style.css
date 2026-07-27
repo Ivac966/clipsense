@@ -1014,3 +1014,4 @@ input.select-input {
         bottom: 1rem;
     }
 }
+.manual-hint { font-size: 0.875rem; color: var(--text-secondary); line-height: 1.6; margin-bottom: 1.25rem; margin-top: -0.5rem; }

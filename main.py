@@ -62,6 +62,7 @@ class SummarizeResponse(BaseModel):
     transcript: str = ""
     video_id: str = ""
     error: str = ""
+    error_type: str = ""
     transcript_length: int = 0
     summary_length: int = 0
     compression: float = 0
@@ -82,19 +83,23 @@ def extract_video_id(url: str) -> str:
 
 
 def fetch_transcript(video_id: str, language: str = "en"):
+    """Returns (text, error_message, error_type)."""
     try:
         api = YouTubeTranscriptApi()
         transcript = api.fetch(video_id, languages=[language, "en"])
         text = " ".join([snippet.text for snippet in transcript])
-        return text, None
+        return text, None, None
     except TranscriptsDisabled:
-        return None, "Transcripts are disabled for this video."
+        return None, "This video has captions turned off by its creator.", "disabled"
     except NoTranscriptFound:
-        return None, f"No transcript found in '{language}' or English."
+        return None, f"No captions available in '{language}' or English.", "not_found"
     except VideoUnavailable:
-        return None, "Video is unavailable or private."
+        return None, "This video is private or unavailable.", "unavailable"
     except Exception as e:
-        return None, f"Could not fetch transcript: {str(e)}"
+        message = str(e).lower()
+        if "blocking requests" in message or "ipblocked" in message or "requestblocked" in message:
+            return None, "YouTube blocks automatic transcript downloads from cloud servers.", "ip_blocked"
+        return None, "Could not retrieve the transcript for this video.", "generic"
 
 
 def summarize_with_ai(text: str, style: str, model: str) -> str:
@@ -146,15 +151,17 @@ async def summarize(request: SummarizeRequest):
     if not video_id:
         return SummarizeResponse(
             success=False,
-            error="Invalid YouTube URL. Please check the link."
+            error="That doesn't look like a valid YouTube link.",
+            error_type="invalid_url"
         )
 
-    transcript, error = fetch_transcript(video_id, request.language)
+    transcript, error, error_type = fetch_transcript(video_id, request.language)
     if error:
         return SummarizeResponse(
             success=False,
             video_id=video_id,
-            error=error
+            error=error,
+            error_type=error_type
         )
 
     try:
@@ -170,11 +177,12 @@ async def summarize(request: SummarizeRequest):
             summary_length=len(summary),
             compression=compression
         )
-    except Exception as e:
+    except Exception:
         return SummarizeResponse(
             success=False,
             video_id=video_id,
-            error=f"AI generation failed: {str(e)}"
+            error="The AI service is unavailable right now. Please try again.",
+            error_type="ai_error"
         )
 
 
@@ -183,7 +191,8 @@ async def summarize_manual(request: SummarizeManualRequest):
     if not request.transcript.strip():
         return SummarizeResponse(
             success=False,
-            error="Transcript is empty."
+            error="Please paste a transcript first.",
+            error_type="empty"
         )
 
     try:
@@ -198,10 +207,11 @@ async def summarize_manual(request: SummarizeManualRequest):
             summary_length=len(summary),
             compression=compression
         )
-    except Exception as e:
+    except Exception:
         return SummarizeResponse(
             success=False,
-            error=f"AI generation failed: {str(e)}"
+            error="The AI service is unavailable right now. Please try again.",
+            error_type="ai_error"
         )
 
 
