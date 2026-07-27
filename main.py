@@ -1,11 +1,12 @@
 """
-YouTube Summarizer - FastAPI Backend
+ClipSense - FastAPI Backend
 Handles transcript fetching and AI summarization.
 """
 
 import os
 import re
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,13 +20,13 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
 )
 
-# Load environment variables
 load_dotenv()
 
-# Initialize FastAPI
-app = FastAPI(title="YouTube Summarizer API")
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
 
-# CORS middleware (allows frontend to talk to backend)
+app = FastAPI(title="ClipSense API")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,15 +35,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Groq client
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY not found in environment variables")
 
-client = Groq(api_key=GROQ_API_KEY)
+def get_client():
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY not found in environment variables")
+    return Groq(api_key=api_key)
 
 
-# --- Request/Response Models ---
 class SummarizeRequest(BaseModel):
     url: str
     style: str = "concise"
@@ -67,9 +67,7 @@ class SummarizeResponse(BaseModel):
     compression: float = 0
 
 
-# --- Helper Functions ---
 def extract_video_id(url: str) -> str:
-    """Extract YouTube video ID from various URL formats."""
     patterns = [
         r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
         r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",
@@ -84,7 +82,6 @@ def extract_video_id(url: str) -> str:
 
 
 def fetch_transcript(video_id: str, language: str = "en"):
-    """Fetch transcript for a YouTube video."""
     try:
         api = YouTubeTranscriptApi()
         transcript = api.fetch(video_id, languages=[language, "en"])
@@ -101,7 +98,8 @@ def fetch_transcript(video_id: str, language: str = "en"):
 
 
 def summarize_with_ai(text: str, style: str, model: str) -> str:
-    """Generate summary using Groq API."""
+    client = get_client()
+
     max_chars = 60000
     if len(text) > max_chars:
         text = text[:max_chars] + "... [transcript truncated]"
@@ -137,16 +135,13 @@ Summary:"""
     return response.choices[0].message.content
 
 
-# --- API Endpoints ---
 @app.get("/")
 async def serve_index():
-    """Serve the frontend."""
-    return FileResponse("static/index.html")
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.post("/api/summarize", response_model=SummarizeResponse)
 async def summarize(request: SummarizeRequest):
-    """Main endpoint: fetch transcript and summarize."""
     video_id = extract_video_id(request.url)
     if not video_id:
         return SummarizeResponse(
@@ -154,7 +149,6 @@ async def summarize(request: SummarizeRequest):
             error="Invalid YouTube URL. Please check the link."
         )
 
-    # Fetch transcript
     transcript, error = fetch_transcript(video_id, request.language)
     if error:
         return SummarizeResponse(
@@ -163,7 +157,6 @@ async def summarize(request: SummarizeRequest):
             error=error
         )
 
-    # Generate summary
     try:
         summary = summarize_with_ai(transcript, request.style, request.model)
         compression = round((1 - len(summary) / len(transcript)) * 100, 1) if transcript else 0
@@ -187,7 +180,6 @@ async def summarize(request: SummarizeRequest):
 
 @app.post("/api/summarize-manual", response_model=SummarizeResponse)
 async def summarize_manual(request: SummarizeManualRequest):
-    """Fallback endpoint: summarize manually pasted transcript."""
     if not request.transcript.strip():
         return SummarizeResponse(
             success=False,
@@ -213,8 +205,7 @@ async def summarize_manual(request: SummarizeManualRequest):
         )
 
 
-# Mount static files (must be LAST — after routes)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 if __name__ == "__main__":
