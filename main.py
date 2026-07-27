@@ -18,16 +18,22 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# Groq deprecates llama-3.3-70b-versatile and llama-3.1-8b-instant on 08/16/26.
-# After that date, change the values on the right side to the replacements.
+# Left side = what the frontend sends. Right side = what actually goes to Groq.
+# Groq shuts down llama-3.3-70b-versatile and llama-3.1-8b-instant on 08/16/26,
+# so the old frontend IDs are routed to their gpt-oss replacements here.
 MODEL_MAP = {
-    "llama-3.3-70b-versatile": "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant": "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+    "llama-3.1-8b-instant": "openai/gpt-oss-20b",
     "openai/gpt-oss-120b": "openai/gpt-oss-120b",
     "openai/gpt-oss-20b": "openai/gpt-oss-20b",
 }
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
+
+# gpt-oss models spend tokens on internal reasoning before writing the answer.
+# Keep effort low and the token budget generous, or content comes back empty.
+REASONING_MODELS = {"openai/gpt-oss-120b", "openai/gpt-oss-20b"}
+MAX_OUTPUT_TOKENS = 4000
 
 STYLE_PROMPTS = {
     "concise": "Write a short summary in 3 to 5 sentences. Capture only the main point.",
@@ -63,6 +69,8 @@ def build_response(
     compression = 0.0
     if t_len > 0 and s_len > 0:
         compression = round((1 - (s_len / t_len)) * 100, 1)
+        if compression < 0:
+            compression = 0.0
     return {
         "success": success,
         "summary": summary,
@@ -144,41 +152,53 @@ def summarize_text(transcript, style, model):
     if len(text) > 24000:
         text = text[:24000]
 
+    kwargs = {
+        "model": resolved_model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You summarize video transcripts clearly and accurately. "
+                    "Never invent information that is not in the transcript."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"{instruction}\n\nTranscript:\n{text}",
+            },
+        ],
+        "temperature": 0.3,
+        "max_tokens": MAX_OUTPUT_TOKENS,
+    }
+
+    if resolved_model in REASONING_MODELS:
+        kwargs["reasoning_effort"] = "low"
+
     try:
         client = get_groq_client()
-        completion = client.chat.completions.create(
-            model=resolved_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You summarize video transcripts clearly and accurately. "
-                        "Never invent information that is not in the transcript."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"{instruction}\n\nTranscript:\n{text}",
-                },
-            ],
-            temperature=0.3,
-            max_tokens=1600,
-        )
+        completion = client.chat.completions.create(**kwargs)
 
         if not completion.choices:
             print("GROQ RETURNED NO CHOICES:", completion)
             return "", "The AI service returned an empty response."
 
-        summary = (completion.choices[0].message.content or "").strip()
+        choice = completion.choices[0]
+        summary = (getattr(choice.message, "content", "") or "").strip()
 
+        # Never fall back to the reasoning field. It holds the model's internal
+        # chain of thought, not the answer, and must not be shown to users.
         if not summary:
-            print("GROQ RETURNED EMPTY CONTENT:", completion)
-            return "", "The AI service returned an empty summary."
+            print(
+                "GROQ RETURNED EMPTY CONTENT | model:", resolved_model,
+                "| finish_reason:", getattr(choice, "finish_reason", "?"),
+                "| usage:", getattr(completion, "usage", "?"),
+            )
+            return "", "The AI ran out of room before writing the summary. Try a shorter transcript."
 
         return summary, ""
 
     except Exception as exc:
-        print("GROQ CALL FAILED:", repr(exc))
+        print("GROQ CALL FAILED | model:", resolved_model, "|", repr(exc))
         traceback.print_exc()
         return "", f"AI service error: {exc}"
 
@@ -201,6 +221,8 @@ def health():
         "key_stripped_length": len(key.strip()),
         "key_prefix": key.strip()[:4],
         "default_model": DEFAULT_MODEL,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "model_map": MODEL_MAP,
     }
 
 
