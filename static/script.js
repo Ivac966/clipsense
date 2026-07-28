@@ -107,6 +107,72 @@ function on(el, event, handler) {
 }
 
 /* --------------------------------------------
+   Markdown rendering
+   -------------------------------------------- */
+
+// The AI returns markdown. Escape everything first so no raw HTML from the
+// model can ever reach the page, then convert the safe subset we support.
+function escapeHtml(text) {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function renderInline(text) {
+    return text
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|\s)\*([^*]+)\*/g, '$1<em>$2</em>')
+        .replace(/`([^`]+)`/g, '<code style="background:rgba(255,255,255,0.08);padding:2px 5px;border-radius:4px;">$1</code>');
+}
+
+function renderMarkdown(text) {
+    const lines = escapeHtml(text || '').split('\n');
+    const out = [];
+    let inList = false;
+
+    const closeList = () => {
+        if (inList) {
+            out.push('</ul>');
+            inList = false;
+        }
+    };
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+
+        if (!line) {
+            closeList();
+            continue;
+        }
+
+        const bullet = line.match(/^[-*\u2022]\s+(.*)$/);
+        const numbered = line.match(/^\d+[.)]\s+(.*)$/);
+        const heading = line.match(/^#{1,6}\s+(.*)$/);
+
+        if (heading) {
+            closeList();
+            out.push('<p style="margin:1.2em 0 0.5em 0;font-weight:700;">' + renderInline(heading[1]) + '</p>');
+        } else if (bullet || numbered) {
+            if (!inList) {
+                out.push('<ul style="margin:0 0 1em 0;padding-left:1.3em;">');
+                inList = true;
+            }
+            const body = bullet ? bullet[1] : numbered[1];
+            out.push('<li style="margin-bottom:0.55em;">' + renderInline(body) + '</li>');
+        } else {
+            closeList();
+            out.push('<p style="margin:0 0 1em 0;">' + renderInline(line) + '</p>');
+        }
+    }
+
+    closeList();
+    return out.join('');
+}
+
+/* --------------------------------------------
    Utilities
    -------------------------------------------- */
 
@@ -171,8 +237,6 @@ function showManualFallback(errorType, serverMessage) {
     setDisplay(elements.manualSection, 'block');
     scrollTo(elements.manualSection, 'start');
 
-    // If the manual box has no heading elements in the HTML, the user would
-    // otherwise get no explanation at all, so surface it as a toast.
     if (!elements.manualTitle && !elements.manualHint) {
         showToast(serverMessage || content.title, true);
     }
@@ -304,7 +368,9 @@ async function summarizeManual() {
 }
 
 function displayResult(data) {
-    setText(elements.summaryOutput, data.summary || '');
+    if (elements.summaryOutput) {
+        elements.summaryOutput.innerHTML = renderMarkdown(data.summary || '');
+    }
     setText(elements.transcriptLength, formatNumber(data.transcript_length));
     setText(elements.summaryLength, formatNumber(data.summary_length));
     setText(elements.compression, `${data.compression || 0}%`);
@@ -348,9 +414,10 @@ elements.styleButtons.forEach((btn) => {
     });
 });
 
+// Copy the rendered text, not the raw markdown, so pasted output stays clean.
 on(elements.copyBtn, 'click', async () => {
     if (!elements.summaryOutput) return;
-    const text = elements.summaryOutput.textContent;
+    const text = elements.summaryOutput.innerText;
     try {
         await navigator.clipboard.writeText(text);
         showToast('Summary copied to clipboard');
